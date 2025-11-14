@@ -51,21 +51,19 @@ class Ghost:
         if request.declaration.uri == "/stats":
             results = await self.db.execute("""
                 SELECT
-                    DATE(datetime(time, 'unixepoch')) AS day,
                     domain,
                     path,
                     COUNT(*) AS hits
                 FROM hits
-                WHERE time >= strftime('%s', 'now', '-30 days')
-                GROUP BY day, domain, path
-                ORDER BY day, domain, path
+                WHERE time >= strftime('%s', 'now', '-1 day')
+                GROUP BY domain, path
+                ORDER BY domain, path
             """)
 
             processed_results = {}
-            for day, domain, path, hits in results:
-                processed_results.setdefault(day, {})
-                processed_results[day].setdefault(domain, {})
-                processed_results[day][domain][path] = hits
+            for domain, path, hits in results:
+                processed_results.setdefault(domain, {})
+                processed_results[domain][path] = hits
 
             return Response(200, json.dumps(processed_results).encode(), {"content-type": "application/json"})
 
