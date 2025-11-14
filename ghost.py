@@ -1,6 +1,7 @@
 # Copyright (c) 2025 iiPython
 
 # Modules
+import os
 import asyncio
 from shadow import Request, Response, Shadow
 
@@ -14,4 +15,4 @@ async def on_request(request: Request) -> Response:
 
 # Launching
 if __name__ == "__main__":
-    asyncio.run(Shadow(on_request).serve("localhost", 8000))
+    asyncio.run(Shadow(on_request).serve(os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", 8000))))
