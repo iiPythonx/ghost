@@ -12,6 +12,86 @@ from shadow import Request, Response, Shadow
 
 # Initialization
 BLANK_RESPONSE = Response(204, b"", {})
+INDEX_DOT_HTML = """
+<!doctype html>
+<html lang = "en">
+    <head>
+        <meta charset = "utf-8">
+
+        <!-- CSS -->
+        <style>
+            * {
+                color: #fff;
+                font-family: monospace;
+            }
+            body {
+                background: #000;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+            }
+            span {
+                width: 25%;
+                text-align: right;
+                font-weight: bold;
+            }
+            article {
+                display: flex;
+                align-items: center;
+
+                & > div {
+                    width: 75%;
+                    height: 15px;
+                }
+            }
+            div.block {
+                height: 15px;
+                background: #fff;
+                -webkit-mask-image: linear-gradient(to left, transparent 0, black 20px, black 100%);
+                mask-image: linear-gradient(to left, transparent 0, black 20px, black 100%);
+            }
+            div.column {
+                width: 50%;
+                display: flex;
+                flex-direction: column;
+                gap: 5px;
+            }
+            h2 {
+                width: 50%;
+            }
+        </style>
+
+        <title>iiPython Ghost</title>
+    </head>
+    <body>
+        <script type = "module">
+            const response = await (await fetch("/stats")).json();
+
+            // Setup columns
+            for (const domain in response) {
+                const column = document.createElement("div");
+                column.innerHTML = `<h2>${domain}</h2>`;
+                column.classList.add("column");
+                document.querySelector("body").appendChild(column);
+
+                // Setup page hits
+                const max = Math.max(...Object.values(response[domain]));
+                for (const path of Object.keys(response[domain]).sort((a, b) => response[domain][b] - response[domain][a])) {
+                    const value = response[domain][path];
+                    const article = document.createElement("article");
+                    article.innerHTML = `
+                        <div>
+                            <div class = "block" style = "width: ${(value / max) * 100}%;"></div>
+                        </div>
+                        <span>${path} (${value})</span>
+                    `;
+                    column.appendChild(article);
+                }
+            }
+        </script>
+    </body>
+</html>
+""".encode()
 
 # Database
 class AsyncSQLite:
@@ -46,7 +126,7 @@ class Ghost:
             self.initialized = True
 
         if request.declaration.uri == "/":
-            return Response(200, b"<script>navigator.sendBeacon('/hi', window.location.href);</script>", {"content-type": "text/html"})
+            return Response(200, INDEX_DOT_HTML, {"content-type": "text/html"})
 
         if request.declaration.uri == "/stats":
             results = await self.db.execute("""
