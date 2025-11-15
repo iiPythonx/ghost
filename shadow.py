@@ -25,9 +25,9 @@ HTTP_HEADER_LINE  = re.compile(b"^(" + TOKEN + b"):\\s*(" + FIELD_VALUE + b")\\s
 # Intermediaries
 @dataclass
 class Declaration:
-    method:  bytes | None
-    uri:     bytes | None
-    version: bytes | None
+    method:  str | None
+    uri:     str | None
+    version: str | None
 
 @dataclass
 class Response:
@@ -44,7 +44,7 @@ class HTTPException(Exception):
 class Request:
     def __init__(self, source: tuple[str, int]) -> None:
         self.declaration: Declaration = Declaration(None, None, None)
-        self.headers: dict[bytes, bytes] = {}
+        self.headers: dict[str, str] = {}
         self.source: tuple[str, int] = source
 
         self._body: bytes = b""
@@ -52,14 +52,14 @@ class Request:
     def consume(self, line: bytes) -> None:
         processed_line = line[:-2]
         if self.declaration.method is None:
-            if processed_line == b"PRI * HTTP/2.0":
+            if processed_line == "PRI * HTTP/2.0":
                 raise HTTPException(505, "Shadow does not support HTTP/2.")
 
             declaration = HTTP_REQUEST_LINE.match(processed_line)
             if declaration is None:
                 raise HTTPException(400, "Malformed HTTP declaration was sent.")
 
-            self.declaration = Declaration(*declaration.groups())
+            self.declaration = Declaration(*(_.decode() for _ in declaration.groups()))
             return
 
         # Parse headers
@@ -68,7 +68,7 @@ class Request:
             raise HTTPException(400, f"Malformed HTTP header line was sent: {processed_line}")
 
         name, value = header_data.groups()
-        self.headers[name.lower()] = value
+        self.headers[name.lower().decode()] = value.decode()
 
     @property
     def body(self) -> bytes:
@@ -119,12 +119,12 @@ class Shadow:
                 if read_stream.at_eof():
                     break
 
-                close_connection = request.headers.get(b"connection") == b"close"
+                close_connection = request.headers.get("connection") == "close"
 
                 # Check for data
-                content_length = request.headers.get(b"content-length")
+                content_length = request.headers.get("content-length")
                 if content_length is not None:
-                    if not content_length.decode("utf-8").isnumeric():
+                    if not content_length.isnumeric():
                         raise HTTPException(400, "Invalid content length provided.")
 
                     request._set_body(await read_stream.read(int(content_length)))
