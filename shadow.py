@@ -6,7 +6,7 @@ import typing
 import asyncio
 from dataclasses import dataclass
 
-__version__ = "shdw/1.1.2"
+__version__ = "shdw/1.1.3"
 
 # Initialization
 UNRESERVED  = b"A-Za-z0-9\\-._~"
@@ -119,7 +119,7 @@ class Shadow:
                 if read_stream.at_eof():
                     break
 
-                keepalive = request.headers.get(b"connection") == b"keep-alive"
+                close_connection = request.headers.get(b"connection") == b"close"
 
                 # Check for data
                 content_length = request.headers.get(b"content-length")
@@ -132,12 +132,12 @@ class Shadow:
                 # Fetch response
                 response = await self.on_request(request)
                 if response is not None:
-                    response.headers |= {"connection": "keep-alive" if keepalive else "close"}
+                    response.headers |= {"connection": "close" if close_connection else "keep-alive"}
                     write_stream.write(self.dump_response(response))
 
-                # If we aren't sent a keep-alive, terminate
+                # If we get told to close, then terminate
                 # after sending off our previous response
-                if not keepalive:
+                if close_connection:
                     break
 
                 await write_stream.drain()
