@@ -6,7 +6,7 @@ import typing
 import asyncio
 from dataclasses import dataclass
 
-__version__ = "shdw/1.0.0"
+__version__ = "shdw/1.1.0"
 
 # Initialization
 UNRESERVED  = b"A-Za-z0-9\\-._~"
@@ -83,7 +83,7 @@ class Shadow:
 
     @staticmethod
     def error(status_code: int, message: str) -> Response:
-        return Response(status_code, message.encode(), {"content-type": "text/plain"})
+        return Response(status_code, message.encode(), {"content-type": "text/plain", "connection": "close"})
 
     @staticmethod
     def dump_response(response: Response) -> bytes:
@@ -92,7 +92,6 @@ class Shadow:
             *[
                 f"{name.lower()}: {value}".encode()
                 for name, value in (response.headers | {
-                    "connection": "close",
                     "content-length": str(len(response.body)),
                     "server": __version__
                 }).items()
@@ -101,33 +100,54 @@ class Shadow:
         ])
 
     async def handle_connection(self, read_stream: asyncio.StreamReader, write_stream: asyncio.StreamWriter) -> None:
-        request, response = Request(write_stream.get_extra_info("peername")[:2]), None
-        try:
+        source = write_stream.get_extra_info("peername")[:2]
 
-            # Feed data into request from client
-            async for item in read_stream:
-                if item == b"\r\n":
+        # Connection loop
+        try:
+            while read_stream:
+                request, response = Request(source), None
+
+                # Feed data into request from client
+                async for item in read_stream:
+                    if item == b"\r\n":
+                        break
+
+                    request.consume(item)
+
+                # If the stream is an EOF after reading a request,
+                # assume the connection is now dead, so kill it.
+                if read_stream.at_eof():
                     break
 
-                request.consume(item)
+                close_connection = request.headers.get(b"connection") == b"close"
 
-            # Check for data
-            content_length = request.headers.get(b"content-length")
-            if content_length is not None:
-                if not content_length.decode("utf-8").isnumeric():
-                    raise HTTPException(400, "Invalid content length provided.")
+                # Check for data
+                content_length = request.headers.get(b"content-length")
+                if content_length is not None:
+                    if not content_length.decode("utf-8").isnumeric():
+                        raise HTTPException(400, "Invalid content length provided.")
 
-                request._set_body(await read_stream.read(int(content_length)))
+                    request._set_body(await read_stream.read(int(content_length)))
 
-            # Fetch response
-            response = await self.on_request(request)
-            if response is not None:
-                write_stream.write(self.dump_response(response))
+                # Fetch response
+                response = await self.on_request(request)
+                if response is not None:
+                    response.headers |= {"connection": "close" if close_connection else "keep-alive"}
+                    write_stream.write(self.dump_response(response))
+
+                # If told to close the connection, terminate
+                # after sending off our previous response
+                if close_connection:
+                    break
+
+                await write_stream.drain()
 
         except HTTPException as k:
             write_stream.write(self.dump_response(self.error(k.status_code, k.message)))
+            await write_stream.drain()
 
-        await write_stream.drain()
+        except ConnectionResetError:
+            return
 
         # Clean up
         write_stream.close()
