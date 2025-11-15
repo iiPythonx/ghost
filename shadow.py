@@ -6,7 +6,7 @@ import typing
 import asyncio
 from dataclasses import dataclass
 
-__version__ = "shdw/1.1.1"
+__version__ = "shdw/1.1.2"
 
 # Initialization
 UNRESERVED  = b"A-Za-z0-9\\-._~"
@@ -20,7 +20,7 @@ VERSION     = b"(\\d+(?:\\.\\d+)?)"
 FIELD_VALUE = b"[\\x20-\\x7E]*"
 
 HTTP_REQUEST_LINE = re.compile(b"^(" + TOKEN + b") (" + REQUEST_TARGET + b") HTTP/" + VERSION + b"$")
-HTTP_HEADER_LINE = re.compile(b"^(" + TOKEN + b"):\\s*(" + FIELD_VALUE + b")\\s*$")
+HTTP_HEADER_LINE  = re.compile(b"^(" + TOKEN + b"):\\s*(" + FIELD_VALUE + b")\\s*$")
 
 # Intermediaries
 @dataclass
@@ -104,7 +104,6 @@ class Shadow:
 
         # Connection loop
         try:
-            print("[Connection]")
             while read_stream:
                 request, response = Request(source), None
 
@@ -120,7 +119,6 @@ class Shadow:
                 if read_stream.at_eof():
                     break
 
-                print("[Request]")
                 keepalive = request.headers.get(b"connection") == b"keep-alive"
 
                 # Check for data
