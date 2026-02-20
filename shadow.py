@@ -37,7 +37,7 @@ class Declaration:
 class Response:
     status_code: int
     body: bytes
-    headers: dict[str, str]
+    headers: list[tuple[bytes, bytes]]
 
 # Exceptions
 class HTTPException(Exception):
@@ -48,10 +48,8 @@ class HTTPException(Exception):
 class Request:
     def __init__(self, source: tuple[str, int]) -> None:
         self.declaration: Declaration = Declaration(None, None, None)
-        self.headers: dict[str, str] = {}
+        self.headers: dict[bytes, bytes] = {}
         self.source: tuple[str, int] = source
-
-        self._body: bytes = b""
 
     def consume(self, line: bytes) -> None:
         processed_line = line[:-2]
@@ -72,33 +70,92 @@ class Request:
             raise HTTPException(400, f"Malformed HTTP header line was sent: {processed_line}")
 
         name, value = header_data.groups()
-        self.headers[name.lower().decode()] = value.decode()
+        self.headers[name.lower()] = value
 
-    @property
-    def body(self) -> bytes:
-        return self._body
+class Scope:
 
-    def _set_body(self, body: bytes) -> None:
-        self._body = body
+    @staticmethod
+    def from_http(request: Request, server) -> dict:
+        path, _, query = request.declaration.uri.partition("?")
+        return {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": request.declaration.version,
+            "method": request.declaration.method,
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": query.encode(),
+            "headers": [(k, v) for k, v in request.headers.items()],
+            "client": request.source,
+            "server": server
+        }
+
+class Receive:
+
+    @staticmethod
+    def from_http(read_stream: asyncio.StreamReader, headers: dict[bytes, bytes]) -> typing.Callable:
+        content_length = headers.get(b"content-length", b"0").decode()
+        if not content_length.isnumeric():
+            raise HTTPException(400, "Invalid content length sent to server!")
+
+        received, content_length = 0, int(content_length)
+        async def receive():
+            nonlocal received
+            if content_length - received <= 0:
+                return {
+                    "type": "http.request",
+                    "body": b"",
+                    "more_body": False
+                }
+
+            chunk = await read_stream.read(min(16384, content_length - received))
+            received += len(chunk)
+
+            if not chunk and received < content_length:
+                return {"type": "http.disconnect"}
+
+            return {
+                "type": "http.request",
+                "body": chunk,
+                "more_body": received < content_length
+            }
+
+        return receive
+
+class Send:
+
+    @staticmethod
+    def from_http(write_stream: asyncio.StreamWriter) -> typing.Callable:
+        status, headers, chunks = 200, [], bytearray()
+
+        async def send(message: dict) -> None:
+            nonlocal status, headers
+            if message["type"] == "http.response.start":
+                status, headers = message["status"], message.get("headers", [])
+
+            elif message["type"] == "http.response.body":
+                chunks.extend(message.get("body", b""))
+                if not message.get("more_body"):
+                    write_stream.write(Shadow.dump_response(Response(status, bytes(chunks), headers)))
+
+        return send
 
 class Shadow:
-    def __init__(self, on_request: typing.Callable) -> None:
-        self.on_request = on_request
+    def __init__(self, app: typing.Callable) -> None:
+        self.app = app
 
     @staticmethod
     def error(status_code: int, message: str) -> Response:
-        return Response(status_code, message.encode(), {"content-type": "text/plain", "connection": "close"})
+        return Response(status_code, message.encode(), [(b"content-type", b"text/plain"), (b"connection", b"close")])
 
     @staticmethod
     def dump_response(response: Response) -> bytes:
         return b"\r\n".join([
             f"HTTP/1.1 {response.status_code}".encode(),
             *[
-                f"{name.lower()}: {value}".encode()
-                for name, value in (response.headers | {
-                    "content-length": str(len(response.body)),
-                    "server": __version__
-                }).items()
+                name.lower() + b": " + value
+                for name, value in response.headers + [(b"server", __version__.encode())]
             ],
             b"\r\n" + response.body
         ])
@@ -171,7 +228,7 @@ class Shadow:
         # Connection loop
         try:
             while read_stream:
-                request, response = Request(source), None
+                request = Request(source)
 
                 # Feed data into request from client
                 async for item in read_stream:
@@ -185,27 +242,25 @@ class Shadow:
                 if read_stream.at_eof():
                     break
 
-                connection = request.headers.get("connection")
-
                 # Handle websockets
-                upgrade = request.headers.get("upgrade")
-                if connection and "Upgrade" in connection and upgrade == "websocket":
-                    websocket_key = request.headers.get("sec-websocket-key")
-                    websocket_version = request.headers.get("sec-websocket-version")
+                upgrade, connection = request.headers.get(b"upgrade"), request.headers.get(b"connection")
+                if connection and b"Upgrade" in connection and upgrade == b"websocket":
+                    websocket_key = request.headers.get(b"sec-websocket-key")
+                    websocket_version = request.headers.get(b"sec-websocket-version")
 
                     if not (websocket_key and websocket_version):
                         raise HTTPException(400, "WebSocket handshake failed.")
 
                     # Calculate accept hash
-                    accept_value = b64encode(sha1(f"{websocket_key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11".encode()).digest())
+                    accept_value = b64encode(sha1(websocket_key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
                     write_stream.write(self.dump_response(Response(
                         101,
                         b"",
-                        {
-                            "Upgrade": "websocket",
-                            "Connection": "Upgrade",
-                            "Sec-WebSocket-Accept": accept_value.decode()
-                        }
+                        [
+                            (b"upgrade", b"websocket"),
+                            (b"connection", b"Upgrade"),
+                            (b"sec-websocket-accept", accept_value)
+                        ]
                     )))
 
                     # Begin loop
@@ -227,26 +282,12 @@ class Shadow:
 
                     break
 
-                # Check for data
-                content_length = request.headers.get("content-length")
-                if content_length is not None:
-                    if not content_length.isnumeric():
-                        raise HTTPException(400, "Invalid content length provided.")
-
-                    request._set_body(await read_stream.read(int(content_length)))
-
                 # Fetch response
-                response = await self.on_request(request)
-                if response is not None:
-                    response.headers |= {"connection": "close" if connection == "close" else "keep-alive"}
-                    write_stream.write(self.dump_response(response))
-
-                # If we get told to close, then terminate
-                # after sending off our previous response
-                if connection == "close":
-                    break
-
-                await write_stream.drain()
+                await self.app(
+                    Scope.from_http(request, write_stream.get_extra_info("sockname")),
+                    Receive.from_http(read_stream, request.headers),
+                    Send.from_http(write_stream)
+                )
 
         except HTTPException as k:
             write_stream.write(self.dump_response(self.error(k.status_code, k.message)))
