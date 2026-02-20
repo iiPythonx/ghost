@@ -1,4 +1,4 @@
-# Copyright (c) 2025 iiPython
+# Copyright (c) 2025-2026 iiPython
 
 # Modules
 import re
@@ -119,7 +119,7 @@ class Shadow:
                 if read_stream.at_eof():
                     break
 
-                close_connection = request.headers.get("connection") == "close"
+                connection = request.headers.get("connection")
 
                 # Check for data
                 content_length = request.headers.get("content-length")
@@ -132,12 +132,12 @@ class Shadow:
                 # Fetch response
                 response = await self.on_request(request)
                 if response is not None:
-                    response.headers |= {"connection": "close" if close_connection else "keep-alive"}
+                    response.headers |= {"connection": "close" if connection == "close" else "keep-alive"}
                     write_stream.write(self.dump_response(response))
 
                 # If we get told to close, then terminate
                 # after sending off our previous response
-                if close_connection:
+                if connection == "close":
                     break
 
                 await write_stream.drain()
