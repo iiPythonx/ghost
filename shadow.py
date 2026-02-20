@@ -6,7 +6,11 @@ import typing
 import asyncio
 from dataclasses import dataclass
 
-__version__ = "shdw/1.1.3"
+import struct
+from base64 import b64encode
+from hashlib import sha1
+
+__version__ = "shdw/1.2.0"
 
 # Initialization
 UNRESERVED  = b"A-Za-z0-9\\-._~"
@@ -99,6 +103,68 @@ class Shadow:
             b"\r\n" + response.body
         ])
 
+    @staticmethod
+    async def read_exact(stream: asyncio.StreamReader, size: int) -> bytes:
+        data = b""
+        while len(data) < size:
+            chunk = await stream.read(size - len(data))
+            if not chunk:
+                raise ConnectionError("Client disconnected!")
+
+            data += chunk
+
+        return data
+
+    @staticmethod
+    async def send_websocket_frame(stream: asyncio.StreamWriter, opcode: int, data: bytes) -> None:
+        frame = bytearray()
+        frame.append(0x80 | opcode)
+
+        # Length indication to client
+        length = len(data)
+        if length < 126:
+            frame.append(length)
+
+        elif length < 65536:
+            frame.append(126)
+            frame += struct.pack(">H", length)
+
+        else:
+            frame.append(127)
+            frame += struct.pack(">Q", length)
+
+        frame.extend(data)
+        stream.write(frame)
+
+    @staticmethod
+    async def read_websocket_frame(stream: asyncio.StreamReader) -> tuple[int, bytes]:
+        message = bytearray()
+        while True:
+            first, second = await Shadow.read_exact(stream, 2)
+
+            # Parsing
+            masked, length = second >> 7, second & 0x7F
+            if masked != 1:
+                raise ValueError("An unmasked client frame was received!")
+
+            # Extended payloads
+            if length == 126:
+                length = struct.unpack(">H", await Shadow.read_exact(stream, 2))[0]
+
+            elif length == 127:
+                length = struct.unpack(">Q", await Shadow.read_exact(stream, 8))[0]
+
+            # Masking
+            mask = await Shadow.read_exact(stream, 4)
+            encoded = await Shadow.read_exact(stream, length)
+
+            # Accumulation
+            message.extend(b ^ mask[i % 4] for i, b in enumerate(encoded))
+            if first >> 7:
+                break
+
+        return first & 0x0F, bytes(message)
+
     async def handle_connection(self, read_stream: asyncio.StreamReader, write_stream: asyncio.StreamWriter) -> None:
         source = write_stream.get_extra_info("peername")[:2]
 
@@ -120,6 +186,46 @@ class Shadow:
                     break
 
                 connection = request.headers.get("connection")
+
+                # Handle websockets
+                upgrade = request.headers.get("upgrade")
+                if connection and "Upgrade" in connection and upgrade == "websocket":
+                    websocket_key = request.headers.get("sec-websocket-key")
+                    websocket_version = request.headers.get("sec-websocket-version")
+
+                    if not (websocket_key and websocket_version):
+                        raise HTTPException(400, "WebSocket handshake failed.")
+
+                    # Calculate accept hash
+                    accept_value = b64encode(sha1(f"{websocket_key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11".encode()).digest())
+                    write_stream.write(self.dump_response(Response(
+                        101,
+                        b"",
+                        {
+                            "Upgrade": "websocket",
+                            "Connection": "Upgrade",
+                            "Sec-WebSocket-Accept": accept_value.decode()
+                        }
+                    )))
+
+                    # Begin loop
+                    while True:
+                        opcode, data = await self.read_websocket_frame(read_stream)
+                        match opcode:
+                            case 0x8:
+                                break
+
+                            case 0x1:
+                                print(data.decode())
+                                await Shadow.send_websocket_frame(write_stream, 1, b"greetings")
+                            
+                            case 0x2:
+                                print(data)
+
+                            case 0x9:
+                                await Shadow.send_websocket_frame(write_stream, 0xA, data)
+
+                    break
 
                 # Check for data
                 content_length = request.headers.get("content-length")
